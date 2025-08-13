@@ -11,7 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROFILE: release
+  PROFILE: maxperf
 
 jobs:
   build:
@@ -82,19 +82,23 @@ jobs:
           echo "SDKROOT=$(xcrun -sdk macosx --show-sdk-path)" >> $GITHUB_ENV
           echo "MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx --show-sdk-platform-version)" >> $GITHUB_ENV
 
-      - name: Install cross for musl/aarch64 targets
+      - name: cross setup
         if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo install cross
+        run: |
+          cargo install cross
 
-      - name: Build forge
+      - name: Build binaries
         env:
+          TAG_NAME: ${{ (env.IS_NIGHTLY == 'true' && 'nightly') || needs.prepare.outputs.tag_name }}
+          SVM_TARGET_PLATFORM: ${{ matrix.svm_target_platform }}
+          PLATFORM_NAME: ${{ matrix.platform }}
           TARGET: ${{ matrix.target }}
           OUT_DIR: target/${{ matrix.target }}/${{ env.PROFILE }}
         shell: bash
         run: |
           set -eo pipefail
-          flags=(--target $TARGET --profile $PROFILE --bin forge
-            --no-default-features --features aws-kms,gcp-kms,cli,asm-keccak)
+          flags=(--target $TARGET --profile $PROFILE --bins
+            --no-default-features --features aws-kms,gcp-kms,cli,asm-keccak,js-tracer)
 
           # `jemalloc` is not fully supported on MSVC or aarch64 Linux.
           if [[ "$TARGET" != *msvc* && "$TARGET" != "aarch64-unknown-linux-gnu" ]]; then
@@ -109,44 +113,41 @@ jobs:
             cargo build "${flags[@]}"
           fi
 
-          # Verify and get info about forge binary
-          forge_bin=$OUT_DIR/forge$ext
-          if [[ -f "$forge_bin" ]]; then
-            echo "✓ Built forge"
-            file "$forge_bin" || true
-            du -h "$forge_bin" || true
-            $forge_bin --version || true
-          else
-            echo "✗ Failed to build forge"
-            exit 1
-          fi
+          bins=(anvil cast chisel forge)
+          for name in "${bins[@]}"; do
+            bin=$OUT_DIR/$name$ext
+            echo ""
+            file "$bin" || true
+            du -h "$bin" || true
+            ldd "$bin" || true
+            $bin --version || true
+            echo "${name}_bin_path=${bin}" >> $GITHUB_ENV
+          done
 
-      - name: Package forge binary
-        id: package
+      - name: Archive binaries
+        id: artifacts
         env:
-          TARGET: ${{ matrix.target }}
-          PLATFORM: ${{ matrix.platform }}
-          ARCH: ${{ matrix.arch }}
+          PLATFORM_NAME: ${{ matrix.platform }}
           OUT_DIR: target/${{ matrix.target }}/${{ env.PROFILE }}
-          VERSION_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
+          VERSION_NAME: ${{ (env.IS_NIGHTLY == 'true' && 'nightly') || needs.prepare.outputs.tag_name }}
+          ARCH: ${{ matrix.arch }}
         shell: bash
         run: |
-          [[ "$TARGET" == *windows* ]] && ext=".exe"
-
-          if [[ "$PLATFORM" == "linux" || "$PLATFORM" == "alpine" ]]; then
-            tar -czvf "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" -C $OUT_DIR forge
-            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
-          elif [ "$PLATFORM" == "darwin" ]; then
+          if [[ "$PLATFORM_NAME" == "linux" || "$PLATFORM_NAME" == "alpine" ]]; then
+            tar -czvf "foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz" -C $OUT_DIR forge cast anvil chisel
+            echo "file_name=foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
+          elif [ "$PLATFORM_NAME" == "darwin" ]; then
             # We need to use gtar here otherwise the archive is corrupt.
             # See: https://github.com/actions/virtual-environments/issues/2619
-            gtar -czvf "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" -C $OUT_DIR forge
-            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
+            gtar -czvf "foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz" -C $OUT_DIR forge cast anvil chisel
+            echo "file_name=foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
           else
             cd $OUT_DIR
-            7z a -tzip "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" forge.exe
-            mv "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" ../../../
-            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" >> $GITHUB_OUTPUT
+            7z a -tzip "foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.zip" forge.exe cast.exe anvil.exe chisel.exe
+            mv "foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.zip" ../../../
+            echo "file_name=foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.zip" >> $GITHUB_OUTPUT
           fi
+          echo "foundry_attestation=foundry_${VERSION_NAME}_${PLATFORM_NAME}_${ARCH}.attestation.txt" >> $GITHUB_OUTPUT
 
       - name: Upload artifacts (for non-release builds)
         if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
