@@ -1,7 +1,9 @@
-name: build
+name: build-and-release
 
 on:
   push:
+    tags:
+      - "v*.*.*"
     branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
@@ -23,7 +25,7 @@ jobs:
           # `runner`: GHA runner label
           # `target`: Rust build target triple
           # `platform` and `arch`: Used in tarball names
-          # `svm`: target platform to use for the Solc binary: https://github.com/roynalnaruto/svm-rs/blob/84cbe0ac705becabdc13168bae28a45ad2299749/svm-builds/build.rs#L4-L24
+          # `svm`: target platform to use for the Solc binary
           - runner: Linux-22.04
             target: x86_64-unknown-linux-gnu
             svm_target_platform: linux-amd64
@@ -63,7 +65,7 @@ jobs:
             arch: amd64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -107,20 +109,57 @@ jobs:
             cargo build "${flags[@]}"
           fi
 
-          # Verify forge was built
+          # Verify and get info about forge binary
           forge_bin=$OUT_DIR/forge$ext
           if [[ -f "$forge_bin" ]]; then
             echo "✓ Built forge"
             file "$forge_bin" || true
             du -h "$forge_bin" || true
+            $forge_bin --version || true
           else
             echo "✗ Failed to build forge"
             exit 1
           fi
 
-      - name: Upload forge binary
+      - name: Package forge binary
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          OUT_DIR: target/${{ matrix.target }}/${{ env.PROFILE }}
+          VERSION_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
+        shell: bash
+        run: |
+          [[ "$TARGET" == *windows* ]] && ext=".exe"
+
+          if [[ "$PLATFORM" == "linux" || "$PLATFORM" == "alpine" ]]; then
+            tar -czvf "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" -C $OUT_DIR forge
+            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
+          elif [ "$PLATFORM" == "darwin" ]; then
+            # We need to use gtar here otherwise the archive is corrupt.
+            # See: https://github.com/actions/virtual-environments/issues/2619
+            gtar -czvf "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" -C $OUT_DIR forge
+            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.tar.gz" >> $GITHUB_OUTPUT
+          else
+            cd $OUT_DIR
+            7z a -tzip "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" forge.exe
+            mv "forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" ../../../
+            echo "file_name=forge_${VERSION_NAME}_${PLATFORM}_${ARCH}.zip" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifacts (for non-release builds)
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: forge-${{ matrix.target }}
-          path: target/${{ matrix.target }}/${{ env.PROFILE }}/forge${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
-          retention-days: 30
+          name: ${{ steps.package.outputs.file_name }}
+          path: ${{ steps.package.outputs.file_name }}
+          retention-days: 7
+
+      - name: Upload to release (for tagged builds)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.file_name }}
+          draft: false
+          prerelease: false
