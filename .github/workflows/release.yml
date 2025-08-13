@@ -11,7 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROFILE: maxperf
+  PROFILE: release
 
 jobs:
   build:
@@ -89,7 +89,7 @@ jobs:
 
       - name: Build binaries
         env:
-          TAG_NAME: ${{ (env.IS_NIGHTLY == 'true' && 'nightly') || needs.prepare.outputs.tag_name }}
+          TAG_NAME: ${{ github.ref_name }}
           SVM_TARGET_PLATFORM: ${{ matrix.svm_target_platform }}
           PLATFORM_NAME: ${{ matrix.platform }}
           TARGET: ${{ matrix.target }}
@@ -129,7 +129,7 @@ jobs:
         env:
           PLATFORM_NAME: ${{ matrix.platform }}
           OUT_DIR: target/${{ matrix.target }}/${{ env.PROFILE }}
-          VERSION_NAME: ${{ (env.IS_NIGHTLY == 'true' && 'nightly') || needs.prepare.outputs.tag_name }}
+          VERSION_NAME: ${{ github.ref_name }}
           ARCH: ${{ matrix.arch }}
         shell: bash
         run: |
@@ -153,14 +153,14 @@ jobs:
         if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.file_name }}
-          path: ${{ steps.package.outputs.file_name }}
+          name: ${{ steps.artifacts.outputs.file_name }}
+          path: ${{ steps.artifacts.outputs.file_name }}
           retention-days: 7
 
       - name: Upload to release (for tagged builds)
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.file_name }}
+          files: ${{ steps.artifacts.outputs.file_name }}
           draft: false
-          prerelease: false
+          prerelease: true
